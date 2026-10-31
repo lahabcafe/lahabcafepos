@@ -577,8 +577,8 @@ const initialMenu=[
 ].map((x,i)=>({id:i+1,category:x[0],name:x[1],price:x[2],active:true}));
 const DBKEY="lahab_pos_advanced_v2";let db={menu:initialMenu,bills:[],orders:[],expenses:[],stock:[],customers:[],settings:{name:"Lahab Café",info:"",footer:"Thank you! Visit again."}};let cart=[],pay="Cash",cat="All",editStockId=null;
 const $=id=>document.getElementById(id), today=()=>{let d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")},money=n=>"₹"+Number(n||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2}),esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const SUPABASE_URL="https://bsibeeocnpcncupuusef.supabase.co";
-const SUPABASE_KEY="sb_publishable_n2554qWt5YhiUHnBimiutA__4LLyfR_";
+const SUPABASE_URL = LAHAB_SUPABASE_URL;
+const SUPABASE_KEY = LAHAB_SUPABASE_PUBLISHABLE_KEY;
 const CLOUD_TABLE="pos_shared_state";
 const LOCAL_RECOVERY_KEY="lahab_pos_cloud_recovery_backup_v1";
 let cloudReady=false, cloudBusy=false, cloudTimer=null, cloudApplying=false;
