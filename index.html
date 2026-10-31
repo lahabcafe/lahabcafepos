@@ -530,7 +530,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
 <section class="view" id="orders"><div class="toolbar"><h2 style="margin-right:auto">Orders & kitchen tickets</h2><select id="orderFilter" onchange="renderOrders()"><option value="all">All orders</option><option value="Open">Open / KOT</option><option value="Completed">Completed</option></select></div><div class="panel"><div id="ordersTable" class="tablewrap"></div></div></section>
 <section class="view" id="reports"><div class="toolbar"><h2 style="margin-right:auto">Business reports</h2><input type="date" id="reportDate" onchange="renderReports()"><button class="secondary" onclick="exportBills()">Export bills CSV</button></div><div class="stats" id="stats"></div><div class="split"><div class="panel"><h2>Top-selling items (selected date)</h2><div id="topItems" class="tablewrap"></div></div><div class="panel"><h2>Payment summary</h2><div id="paymentSummary"></div><h3>Profit estimate</h3><div id="profitSummary"></div><p class="hint">Estimate = sales minus recorded expenses. It is not accounting profit unless all costs and taxes are entered.</p></div></div><div class="panel" style="margin-top:12px"><h2>Bill history</h2><div id="billTable" class="tablewrap"></div></div></section>
 <section class="view" id="todayReport">
-<div class="analytics-head"><div><span class="hero-kicker">LAHAB CAFÉ · DAILY SUMMARY</span><h2>📅 Today Sale Report</h2><p>Cash, UPI, expenses, profit, popular items, peak hour and parcel orders.</p></div><div class="field month-field"><label>Report date</label><input type="date" id="todayReportDate" onchange="renderTodayReport()"></div></div>
+<div class="analytics-head"><div><span class="hero-kicker">LAHAB CAFÉ · DAILY SUMMARY</span><h2>📅 Today Sale Report</h2><p>Cash, UPI, expenses, profit, popular items, peak hour and parcel orders.</p><span id="todayLiveState" class="badge amber">● Connecting to cloud…</span></div><div class="field month-field"><label>Report date</label><input type="date" id="todayReportDate" onchange="renderTodayReport()"></div></div>
 <div class="stats" id="todayReportStats"></div>
 <div class="analytics-grid chart-grid"><div class="panel chart-panel"><h2>💳 Payment mix</h2><p class="hint">Cash, UPI and card share for the selected day.</p><canvas id="todayPaymentChart" aria-label="Payment mix chart"></canvas></div><div class="panel chart-panel"><h2>📊 Sales by hour</h2><p class="hint">Compare completed sales across the day.</p><canvas id="todayHourlyChart" aria-label="Sales by hour chart"></canvas></div></div>
 <div class="analytics-grid chart-grid"><div class="panel chart-panel"><h2>🏆 Top products</h2><p class="hint">Most sold products for the selected day.</p><canvas id="todayProductsChart" aria-label="Top products chart"></canvas></div><div class="panel chart-panel"><h2>📦 Order type split</h2><p class="hint">Dine-in vs takeaway vs delivery bills.</p><canvas id="todayOrderChart" aria-label="Order type chart"></canvas></div></div>
@@ -593,10 +593,25 @@ const LOCAL_RECOVERY_KEY="lahab_pos_cloud_recovery_backup_v1";
 let cloudReady=false, cloudBusy=false, cloudTimer=null, cloudApplying=false;
 let lastCloudJson="", lastCloudUpdatedAt="", cloudInitInProgress=false;
 let cloudSyncConflict=false, cloudConflictAlertShown=false;
+let cloudChannel=null, cloudPullTimer=null;
 
 function setCloudStatus(text,color){
  const el=$("netStatus");
  if(el){el.textContent=text;if(color)el.style.color=color;}
+ const live=$("todayLiveState");
+ if(live){
+  if(cloudSyncConflict||/conflict/i.test(text)){
+   live.textContent="● SYNC PAUSED · REVIEW REQUIRED";live.className="badge amber";
+  }else if(!navigator.onLine||/offline/i.test(text)){
+   live.textContent="● OFFLINE · LOCAL DATA";live.className="badge amber";
+  }else if(cloudReady){
+   live.textContent=cloudChannel?"● LIVE · REALTIME SYNC":"● LIVE · AUTO REFRESH";live.className="badge green";
+  }else if(/error|setup needed/i.test(text)){
+   live.textContent="● CLOUD CONNECTION ISSUE";live.className="badge amber";
+  }else{
+   live.textContent="● CONNECTING TO CLOUD…";live.className="badge amber";
+  }
+ }
 }
 
 async function cloudRequest(path, options={}) {
@@ -677,7 +692,13 @@ async function pushCloud(){
   // Keep local edits intact and allow another retry; never replace them with a stale cloud copy here.
   console.error("Cloud push failed:",e);
   setCloudStatus("● Cloud sync error — check Supabase setup","#b51f2b");
- }finally{cloudBusy=false;}
+ }finally{
+  cloudBusy=false;
+  if(cloudReady&&!cloudApplying&&!cloudSyncConflict&&JSON.stringify(db)!==lastCloudJson){
+   if(cloudTimer)clearTimeout(cloudTimer);
+   cloudTimer=setTimeout(()=>{cloudTimer=null;pushCloud();},350);
+  }
+ }
 }
 
 function queueCloudPush(){
@@ -704,8 +725,8 @@ async function pullCloud(){
    cloudApplying=true;
    db={...db,...row.data};
    lastCloudUpdatedAt=stamp;
-   // load() may normalize derived menu categories; update storage and snapshot afterwards.
-   load();
+   // Render the cloud copy without reading the older localStorage copy over it.
+   load(false);
    localStorage.setItem(DBKEY,JSON.stringify(db));
    lastCloudJson=JSON.stringify(db);
    setCloudStatus("● Cloud synced");
@@ -714,6 +735,39 @@ async function pullCloud(){
   console.error("Cloud pull failed:",e);
   setCloudStatus("● Cloud read error — check connection/setup","#b51f2b");
  }finally{cloudApplying=false;}
+}
+
+function startCloudRealtime(){
+ if(!lahabAuthClient||!cloudReady||cloudChannel)return;
+ let channel;
+ try{
+  channel=lahabAuthClient
+   .channel("lahab-pos-shared-state-live")
+   .on("postgres_changes",{
+    event:"*",schema:"public",table:CLOUD_TABLE,filter:"id=eq.1"
+   },payload=>{
+    if(!cloudReady||!navigator.onLine||cloudSyncConflict||payload.eventType==="DELETE")return;
+    const incomingStamp=payload.new&&payload.new.updated_at||"";
+    if(incomingStamp&&incomingStamp===lastCloudUpdatedAt)return;
+    if(cloudPullTimer)clearTimeout(cloudPullTimer);
+    cloudPullTimer=setTimeout(()=>{cloudPullTimer=null;pullCloud();},160);
+   })
+   .subscribe(status=>{
+    if(status==="SUBSCRIBED"){
+     setCloudStatus("● Cloud synced · live");
+     if($("todayReport")?.classList.contains("active"))renderTodayReport();
+    }else if(status==="CHANNEL_ERROR"||status==="TIMED_OUT"||status==="CLOSED"){
+     console.warn("Supabase Realtime unavailable; automatic polling will continue:",status);
+     if(cloudChannel===channel)cloudChannel=null;
+     setCloudStatus(cloudReady?"● Cloud synced · auto refresh":"● Connecting to cloud…","#9a641b");
+     if($("todayReport")?.classList.contains("active"))renderTodayReport();
+    }
+   });
+  cloudChannel=channel;
+ }catch(e){
+  cloudChannel=null;
+  console.warn("Could not start Supabase Realtime; automatic polling will continue:",e);
+ }
 }
 
 async function initCloudSync(){
@@ -737,20 +791,23 @@ async function initCloudSync(){
    cloudApplying=true;
    db={...db,...row.data};
    lastCloudUpdatedAt=row.updated_at||"";
-   // load() renders the UI and normalizes derived menu categories.
-   // Capture the sync snapshot only AFTER that normalization is complete.
-   load();
+   // Render the cloud copy without re-reading stale localStorage over it.
+   load(false);
    localStorage.setItem(DBKEY,JSON.stringify(db));
    lastCloudJson=JSON.stringify(db);
    cloudApplying=false;
    cloudReady=true;
-   setCloudStatus(localBackupSaved?"● Cloud loaded — local backup saved":"● Cloud synced",localBackupSaved?"#9a641b":undefined);
+   setCloudStatus(localBackupSaved?"● Cloud synced · local backup saved":"● Cloud synced",localBackupSaved?"#9a641b":undefined);
+   startCloudRealtime();
+   renderTodayReport();
   }else{
    // First-time setup: create the single shared state using a compare-and-save database function.
    lastCloudJson="";
    lastCloudUpdatedAt="";
    cloudReady=true;
    await pushCloud();
+   startCloudRealtime();
+   renderTodayReport();
   }
  }catch(e){
   cloudApplying=false;
@@ -765,16 +822,16 @@ persist=function(){originalPersist();queueCloudPush();};
 window.addEventListener("online",()=>{
  networkStatus();
  if(!cloudReady&&!cloudSyncConflict)initCloudSync();
- else if(cloudReady){if(JSON.stringify(db)!==lastCloudJson)pushCloud();else pullCloud();}
+ else if(cloudReady){startCloudRealtime();if(JSON.stringify(db)!==lastCloudJson)pushCloud();else pullCloud();}
 });
-window.addEventListener("focus",()=>{if(cloudReady)pullCloud();else if(!cloudSyncConflict)initCloudSync();});
-document.addEventListener("visibilitychange",()=>{if(!document.hidden){if(cloudReady)pullCloud();else if(!cloudSyncConflict)initCloudSync();}});
+window.addEventListener("focus",()=>{if(cloudReady){startCloudRealtime();pullCloud();}else if(!cloudSyncConflict)initCloudSync();});
+document.addEventListener("visibilitychange",()=>{if(!document.hidden){if(cloudReady){startCloudRealtime();pullCloud();}else if(!cloudSyncConflict)initCloudSync();}});
 setInterval(()=>{if(cloudReady)pullCloud();},4000);
 
 function persist(){localStorage.setItem(DBKEY,JSON.stringify(db));}
-function load(){
+function load(useStoredData=true){
  try{
-  const x=JSON.parse(localStorage.getItem(DBKEY));
+  const x=useStoredData?JSON.parse(localStorage.getItem(DBKEY)):null;
   if(x&&Array.isArray(x.menu)&&Array.isArray(x.bills))db={...db,...x};
  }catch(e){console.warn("Could not read local POS data:",e);}
  ["reportDate","expDate","expFilter"].forEach(id=>{const el=$(id);if(el)el.value=today();});
@@ -785,15 +842,16 @@ function load(){
  renderAll();
  networkStatus();
  // This is a single-file deployment; the service worker is optional and may not be present.
- if("serviceWorker"in navigator){navigator.serviceWorker.register("./sw.js?v=lahab-fixed-20261029",{updateViaCache:"none"}).then(r=>r.update()).catch(()=>{});}
+ if("serviceWorker"in navigator){navigator.serviceWorker.register("./sw.js?v=lahab-live-sync-20261101",{updateViaCache:"none"}).then(r=>r.update()).catch(()=>{});}
 }
 function networkStatus(){
  if(!navigator.onLine){setCloudStatus("● Offline — changes are not syncing","#9a641b");}
  else if(!cloudReady&&!cloudSyncConflict){setCloudStatus("● Waiting for cloud connection","#9a641b");}
 }
-window.addEventListener("online",networkStatus);window.addEventListener("offline",networkStatus);
+window.addEventListener("online",()=>{networkStatus();if($("todayReport")?.classList.contains("active"))renderTodayReport();});
+window.addEventListener("offline",()=>{networkStatus();if($("todayReport")?.classList.contains("active"))renderTodayReport();});
 function go(v){document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id===v));document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.v===v));if(v==="reports")renderReports();if(v==="todayReport")renderTodayReport();if(v==="analytics")renderAnalytics();if(v==="orders")renderOrders();if(v==="inventory")renderStock();if(v==="expenses")renderExpenses();if(v==="customers")renderCustomers();if(v==="settings")renderMenuAdmin();scrollTo({top:0,behavior:"smooth"})}
-function renderAll(){renderCats();renderProducts();renderCart();renderReports();renderOrders();renderStock();renderExpenses();renderCustomers();renderMenuAdmin();renderAnalytics()}
+function renderAll(){renderCats();renderProducts();renderCart();renderReports();renderTodayReport();renderOrders();renderStock();renderExpenses();renderCustomers();renderMenuAdmin();renderAnalytics()}
 function renderCats(){let cats=["All",...new Set(db.menu.filter(m=>m.active!==false).map(m=>m.category))];$("cats").innerHTML=cats.map(c=>`<button class="cat ${cat===c?"active":""}" onclick="cat=${JSON.stringify(c)};renderCats();renderProducts()">${esc(c)}</button>`).join("")}
 function menuVisual(m){let s=(m.name+" "+m.category).toLowerCase();if(/tea|horlicks|boost|coffee/.test(s))return "☕";if(/mojito|lime|lemon|mint|juice|drink/.test(s))return "🍹";if(/shake|milkshake|mango|avocado|chiku|tender|strawberry|blueberry|apple|dates|berry|vanilla|oreo|kitkat|snickers/.test(s))return "🥤";if(/fries/.test(s))return "🍟";if(/burger/.test(s))return "🍔";if(/sandwich|club/.test(s))return "🥪";if(/momo/.test(s))return "🥟";if(/crab/.test(s))return "🦀";if(/chicken|nugget|strip/.test(s))return "🍗";return "🍽️"}
 function renderProducts(){let q=$("menuSearch").value.toLowerCase().trim(),items=db.menu.filter(m=>m.active!==false&&(cat==="All"||m.category===cat)&&(!q||(m.name+" "+m.category).toLowerCase().includes(q)));$("products").innerHTML=items.map(m=>`<button class="product" onclick="addItem(${m.id})"><span class="pvisual" aria-hidden="true">${menuVisual(m)}</span><span class="pname">${esc(m.name)}</span><span class="pfoot"><span class="price">${money(m.price)}</span><span class="plus">+</span></span></button>`).join("")||'<div class="empty">No menu items found.</div>'}
@@ -830,6 +888,12 @@ function drawDonutChart(id,labels,values){
 }
 function renderTodayReport(){
  const dateEl=$("todayReportDate");if(!dateEl)return;if(!dateEl.value)dateEl.value=today();
+ const liveEl=$("todayLiveState");
+ if(liveEl){
+  const online=!!navigator.onLine;
+  liveEl.textContent=cloudSyncConflict?"● SYNC PAUSED · REVIEW REQUIRED":!online?"● OFFLINE · LOCAL DATA":cloudReady?(cloudChannel?"● LIVE · REALTIME SYNC":"● LIVE · AUTO REFRESH"):"● CONNECTING TO CLOUD…";
+  liveEl.className="badge "+(cloudReady&&!cloudSyncConflict?"green":"amber");
+ }
  const date=dateEl.value,bs=db.bills.filter(b=>localDateKey(b.date)===date),ex=db.expenses.filter(e=>e.date===date);
  const sales=bs.reduce((s,b)=>s+(Number(b.total)||0),0),expenses=ex.reduce((s,e)=>s+(Number(e.amount)||0),0),units=bs.reduce((s,b)=>s+(b.items||[]).reduce((n,i)=>n+(Number(i.qty)||0),0),0),fmt=v=>money(v);
  const pays={Cash:0,UPI:0,Card:0};bs.forEach(b=>pays[b.payment||"Other"]=(pays[b.payment||"Other"]||0)+(Number(b.total)||0));
