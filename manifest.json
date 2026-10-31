@@ -1,0 +1,12 @@
+{
+  "id": "./",
+  "name": "LAHAB CAFE POS",
+  "short_name": "LAHAB POS",
+  "description": "LAHAB Cafe point of sale",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fffafb",
+  "theme_color": "#8c1730"
+}
