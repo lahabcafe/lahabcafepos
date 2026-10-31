@@ -694,10 +694,11 @@ async function pullCloud(){
    }
    cloudApplying=true;
    db={...db,...row.data};
+   lastCloudUpdatedAt=stamp;
+   // load() may normalize derived menu categories; update storage and snapshot afterwards.
+   load();
    localStorage.setItem(DBKEY,JSON.stringify(db));
    lastCloudJson=JSON.stringify(db);
-   lastCloudUpdatedAt=stamp;
-   load();
    setCloudStatus("● Cloud synced");
   }
  }catch(e){
@@ -726,10 +727,12 @@ async function initCloudSync(){
    }
    cloudApplying=true;
    db={...db,...row.data};
+   lastCloudUpdatedAt=row.updated_at||"";
+   // load() renders the UI and normalizes derived menu categories.
+   // Capture the sync snapshot only AFTER that normalization is complete.
+   load();
    localStorage.setItem(DBKEY,JSON.stringify(db));
    lastCloudJson=JSON.stringify(db);
-   lastCloudUpdatedAt=row.updated_at||"";
-   load();
    cloudApplying=false;
    cloudReady=true;
    setCloudStatus(localBackupSaved?"● Cloud loaded — local backup saved":"● Cloud synced",localBackupSaved?"#9a641b":undefined);
